@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -e
+
+echo "MaxMind GeoIP Database Installer"
+exit 0 # should always run

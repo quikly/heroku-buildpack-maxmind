@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+BUILD_DIR=$1
+CACHE_DIR=$2
+ENV_DIR=$3
+
+source "$(dirname "${0}")/support/bash_functions.sh"
+
+# Setup paths
+VENDOR_DIR="$BUILD_DIR/vendor"
+MAXMIND_CACHE_DIR="$CACHE_DIR/maxmind"
+MAXMIND_EDITIONS=${MAXMIND_EDITIONS:-"GeoLite2-Country"}
+
+# Create .profile.d directory
+PROFILE_DIR="$BUILD_DIR/.profile.d"
+mkdir -p "$PROFILE_DIR"
+
+# Create the profile script with support for multiple DBs
+cat << EOF > "$PROFILE_DIR/maxmind-defaults.sh"
+#!/usr/bin/env bash
+
+# Base directory for all MaxMind databases
+export MAXMIND_DB_DIR=\${MAXMIND_DB_DIR:-\$HOME/vendor}
+
+# List of installed editions
+export MAXMIND_EDITIONS=\${MAXMIND_EDITIONS:-"$MAXMIND_EDITIONS"}
+
+# Individual database paths (for convenience)
+EOF
+
+# Add each edition's path to the profile script
+IFS=', ' read -ra EDITION_ARRAY <<< "$MAXMIND_EDITIONS"
+for edition in "${EDITION_ARRAY[@]}"; do
+    # Convert edition name to uppercase env var name (e.g., GeoLite2-City -> MAXMIND_GEOLITE2_CITY_PATH)
+    env_name="MAXMIND_$(echo "$edition" | tr '[:lower:]-' '[:upper:]_')_PATH"
+    echo "export $env_name=\${$env_name:-\$MAXMIND_DB_DIR/$edition.mmdb}" >> "$PROFILE_DIR/maxmind-defaults.sh"
+done
+
+step "Created .profile.d/maxmind-defaults.sh"
+
+step "Setting up MaxMind GeoIP2"
+
+# Create necessary directories
+mkdir -p "$VENDOR_DIR"
+mkdir -p "$MAXMIND_CACHE_DIR"
+
+# Get MaxMind license key from environment
+if [ -d "$ENV_DIR" ] && [ -f "$ENV_DIR/MAXMIND_LICENSE_KEY" ]; then
+  MAXMIND_LICENSE_KEY=$(cat "$ENV_DIR/MAXMIND_LICENSE_KEY")
+else
+  error "MAXMIND_LICENSE_KEY is required"
+  exit 1
+fi
+
+download_database() {
+  local edition=$1
+  local db_filename="${edition}.mmdb"
+  local cache_path="$MAXMIND_CACHE_DIR/${db_filename}"
+  local vendor_path="$VENDOR_DIR/${db_filename}"
+  local download_url="https://download.maxmind.com/app/geoip_download?edition_id=${edition}&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz"
+  local temp_dir=$(mktemp -d)
+
+  step "Downloading ${edition} database..."
+  if ! curl -s -L "$download_url" -o "${temp_dir}/db.tar.gz"; then
+    error "Download failed for ${edition}"
+    return 1
+  fi
+
+  step "Extracting database..."
+  if ! tar -xzf "${temp_dir}/db.tar.gz" -C "$temp_dir"; then
+    error "Extraction failed for ${edition}"
+    return 1
+  fi
+
+  step "Looking for database file..."
+  if db_file=$(find "$temp_dir" -name "*.mmdb" -print -quit); then
+    step "Found database: $(basename "$db_file")"
+    cp "$db_file" "$cache_path"
+    cp "$db_file" "$vendor_path"
+  else
+    error "No database file found in downloaded archive"
+    return 1
+  fi
+
+  # Cleanup
+  rm -rf "$temp_dir"
+
+  step_succeeded "Successfully installed ${edition} database"
+  return 0
+}
+
+should_download() {
+  local edition=$1
+  local db_filename="${edition}.mmdb"
+  local cache_path="$MAXMIND_CACHE_DIR/${db_filename}"
+
+  if [ -f "$cache_path" ]; then
+    step "Using cached ${edition} database"
+    return 1
+  fi
+
+  return 0
+}
+
+# Main logic
+for edition in $MAXMIND_EDITIONS; do
+  if should_download "$edition"; then
+    if ! download_database "$edition"; then
+      error "Failed to install ${edition} database"
+      exit 1
+    fi
+  fi
+done
+
+step_succeeded "MaxMind GeoIP2 installation complete"
