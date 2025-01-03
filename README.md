@@ -24,7 +24,7 @@ heroku config:set MAXMIND_LICENSE_KEY=your_license_key_here
 
 ### Optional Environment Variables
 
-- `MAXMIND_EDITIONS`: Space or comma-separated list of database editions to install
+- `MAXMIND_EDITIONS`: Space-separated list of database editions to install
   - Default: `GeoLite2-Country`
   - Available options: `GeoLite2-Country`, `GeoLite2-City`, `GeoLite2-ASN`
   - Example: `heroku config:set MAXMIND_EDITIONS="GeoLite2-Country GeoLite2-City"`
@@ -96,8 +96,4 @@ const result = reader.get('8.8.8.8');
 ```bash
 heroku builds:cache:purge -a your-app-name
 ```
-
-## Support
-
-For issues and questions, please [open an issue](https://github.com/quikly/heroku-buildpack-maxmind/issues).
 

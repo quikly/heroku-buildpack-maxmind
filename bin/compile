@@ -17,7 +17,7 @@ PROFILE_DIR="$BUILD_DIR/.profile.d"
 mkdir -p "$PROFILE_DIR"
 
 # Create the profile script with support for multiple DBs
-cat << EOF > "$PROFILE_DIR/maxmind-defaults.sh"
+cat <<EOF >"$PROFILE_DIR/maxmind-defaults.sh"
 #!/usr/bin/env bash
 
 # Base directory for all MaxMind databases
@@ -30,11 +30,10 @@ export MAXMIND_EDITIONS=\${MAXMIND_EDITIONS:-"$MAXMIND_EDITIONS"}
 EOF
 
 # Add each edition's path to the profile script
-IFS=', ' read -ra EDITION_ARRAY <<< "$MAXMIND_EDITIONS"
-for edition in "${EDITION_ARRAY[@]}"; do
-    # Convert edition name to uppercase env var name (e.g., GeoLite2-City -> MAXMIND_GEOLITE2_CITY_PATH)
-    env_name="MAXMIND_$(echo "$edition" | tr '[:lower:]-' '[:upper:]_')_PATH"
-    echo "export $env_name=\${$env_name:-\$MAXMIND_DB_DIR/$edition.mmdb}" >> "$PROFILE_DIR/maxmind-defaults.sh"
+for edition in $MAXMIND_EDITIONS; do
+  # Convert edition name to uppercase env var name (e.g., GeoLite2-City -> MAXMIND_GEOLITE2_CITY_PATH)
+  env_name="MAXMIND_$(echo "$edition" | tr '[:lower:]-' '[:upper:]_')_PATH"
+  echo "export $env_name=\${$env_name:-\$MAXMIND_DB_DIR/$edition.mmdb}" >>"$PROFILE_DIR/maxmind-defaults.sh"
 done
 
 step "Created .profile.d/maxmind-defaults.sh"
@@ -45,47 +44,60 @@ step "Setting up MaxMind GeoIP2"
 mkdir -p "$VENDOR_DIR"
 mkdir -p "$MAXMIND_CACHE_DIR"
 
-# Get MaxMind license key from environment
-if [ -d "$ENV_DIR" ] && [ -f "$ENV_DIR/MAXMIND_LICENSE_KEY" ]; then
+# Get MaxMind credentials from environment
+if [ -d "$ENV_DIR" ]; then
+  if [ ! -f "$ENV_DIR/MAXMIND_LICENSE_KEY" ]; then
+    error "MAXMIND_LICENSE_KEY is required"
+    exit 1
+  fi
+  if [ ! -f "$ENV_DIR/MAXMIND_ACCOUNT_ID" ]; then
+    error "MAXMIND_ACCOUNT_ID is required"
+    exit 1
+  fi
   MAXMIND_LICENSE_KEY=$(cat "$ENV_DIR/MAXMIND_LICENSE_KEY")
-else
-  error "MAXMIND_LICENSE_KEY is required"
-  exit 1
+  MAXMIND_ACCOUNT_ID=$(cat "$ENV_DIR/MAXMIND_ACCOUNT_ID")
 fi
 
 download_database() {
   local edition=$1
-  local db_filename="${edition}.mmdb"
-  local cache_path="$MAXMIND_CACHE_DIR/${db_filename}"
-  local vendor_path="$VENDOR_DIR/${db_filename}"
-  local download_url="https://download.maxmind.com/app/geoip_download?edition_id=${edition}&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz"
+  local download_url="https://download.maxmind.com/geoip/databases/${edition}/download?suffix=tar.gz"
   local temp_dir=$(mktemp -d)
 
   step "Downloading ${edition} database..."
-  if ! curl -s -L "$download_url" -o "${temp_dir}/db.tar.gz"; then
+  wget --no-verbose \
+       --content-disposition \
+       --directory-prefix="$temp_dir" \
+       --user="$MAXMIND_ACCOUNT_ID" \
+       --password="$MAXMIND_LICENSE_KEY" \
+       "$download_url"
+
+  if [ $? -ne 0 ]; then
     error "Download failed for ${edition}"
+    rm -rf "$temp_dir"
     return 1
   fi
 
-  step "Extracting database..."
-  if ! tar -xzf "${temp_dir}/db.tar.gz" -C "$temp_dir"; then
+  # Get the versioned directory name from the archive
+  local archive_name=$(ls "$temp_dir")
+  local version_dir=$(basename "$archive_name" .tar.gz)
+
+  step "Extracting database from $archive_name..."
+  if ! tar -xzf "$temp_dir/$archive_name" -C "$temp_dir"; then
     error "Extraction failed for ${edition}"
+    rm -rf "$temp_dir"
     return 1
   fi
 
-  step "Looking for database file..."
-  if db_file=$(find "$temp_dir" -name "*.mmdb" -print -quit); then
-    step "Found database: $(basename "$db_file")"
-    cp "$db_file" "$cache_path"
-    cp "$db_file" "$vendor_path"
-  else
-    error "No database file found in downloaded archive"
-    return 1
-  fi
+  step "Installing new version ${version_dir}..."
 
-  # Cleanup
+  # Store versioned directory in cache (for version checking in subsequent builds)
+  rm -rf "${MAXMIND_CACHE_DIR:?}/${edition}_"*
+  mv "$temp_dir/$version_dir" "$MAXMIND_CACHE_DIR/$version_dir"
+
+  # Copy the database file to vendor directory (for runtime use)
+  cp "$MAXMIND_CACHE_DIR/$version_dir/${edition}.mmdb" "$VENDOR_DIR/${edition}.mmdb"
+
   rm -rf "$temp_dir"
-
   step_succeeded "Successfully installed ${edition} database"
   return 0
 }
@@ -94,22 +106,63 @@ should_download() {
   local edition=$1
   local db_filename="${edition}.mmdb"
   local cache_path="$MAXMIND_CACHE_DIR/${db_filename}"
+  local download_url="https://download.maxmind.com/geoip/databases/${edition}/download?suffix=tar.gz"
 
-  if [ -f "$cache_path" ]; then
-    step "Using cached ${edition} database"
+  if [ ! -f "$cache_path" ]; then
+    return 0
+  fi
+
+  step "Checking for updates to ${edition} database..."
+
+  # Get remote file info using wget HEAD request
+  local headers
+  headers=$(wget -S --method HEAD \
+                   --quiet \
+                   --user="$MAXMIND_ACCOUNT_ID" \
+                   --password="$MAXMIND_LICENSE_KEY" \
+                   "$download_url" 2>&1)
+
+  if [ $? -ne 0 ]; then
+    step "Failed to check for updates, using cached version"
     return 1
   fi
 
-  return 0
+  # Extract date from Content-Disposition filename (YYYYMMDD format)
+  local remote_date=$(echo "$headers" | grep -i 'content-disposition' | grep -o '[0-9]\{8\}')
+  if [ -z "$remote_date" ]; then
+    step "Could not determine remote version date, using cached version"
+    return 1
+  fi
+
+  # Get local file's timestamp in YYYYMMDD format
+  local local_date=$(date -r "$cache_path" +%Y%m%d)
+
+  if [ "$remote_date" -gt "$local_date" ]; then
+    step "New version available (local: ${local_date}, remote: ${remote_date})"
+    return 0
+  fi
+
+  step "Local database is up to date (${local_date})"
+  return 1
 }
 
 # Main logic
 for edition in $MAXMIND_EDITIONS; do
   if should_download "$edition"; then
     if ! download_database "$edition"; then
-      error "Failed to install ${edition} database"
-      exit 1
+      if [ -f "$MAXMIND_CACHE_DIR/$edition.mmdb" ]; then
+        step "Download failed, using cached version of ${edition}"
+        # Copy cached version to vendor dir
+        cp "$MAXMIND_CACHE_DIR/$edition.mmdb" "$VENDOR_DIR/$edition.mmdb"
+      else
+        error "Failed to install ${edition} database and no cache available"
+        exit 1
+      fi
     fi
+  else
+    step "Using cached version of ${edition}"
+    # Ensure vendor dir has the file
+    cp "$MAXMIND_CACHE_DIR/$edition.mmdb" "$VENDOR_DIR/$edition.mmdb"
   fi
 done
 
