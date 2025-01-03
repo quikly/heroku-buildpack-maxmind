@@ -46,16 +46,13 @@ mkdir -p "$MAXMIND_CACHE_DIR"
 
 # Get MaxMind credentials from environment
 if [ -d "$ENV_DIR" ]; then
-  if [ ! -f "$ENV_DIR/MAXMIND_LICENSE_KEY" ]; then
-    error "MAXMIND_LICENSE_KEY is required"
-    exit 1
+  if [ -f "$ENV_DIR/MAXMIND_LICENSE_KEY" ] && [ -f "$ENV_DIR/MAXMIND_ACCOUNT_ID" ]; then
+    MAXMIND_LICENSE_KEY=$(cat "$ENV_DIR/MAXMIND_LICENSE_KEY")
+    MAXMIND_ACCOUNT_ID=$(cat "$ENV_DIR/MAXMIND_ACCOUNT_ID")
+  else
+    step "MaxMind credentials not found - skipping GeoIP database installation"
+    exit 0
   fi
-  if [ ! -f "$ENV_DIR/MAXMIND_ACCOUNT_ID" ]; then
-    error "MAXMIND_ACCOUNT_ID is required"
-    exit 1
-  fi
-  MAXMIND_LICENSE_KEY=$(cat "$ENV_DIR/MAXMIND_LICENSE_KEY")
-  MAXMIND_ACCOUNT_ID=$(cat "$ENV_DIR/MAXMIND_ACCOUNT_ID")
 fi
 
 download_database() {
