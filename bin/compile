@@ -101,11 +101,10 @@ download_database() {
 
 should_download() {
   local edition=$1
-  local db_filename="${edition}.mmdb"
-  local cache_path="$MAXMIND_CACHE_DIR/${db_filename}"
   local download_url="https://download.maxmind.com/geoip/databases/${edition}/download?suffix=tar.gz"
 
-  if [ ! -f "$cache_path" ]; then
+  # Check if any version of this edition exists in cache
+  if ! ls "${MAXMIND_CACHE_DIR}/${edition}_"* >/dev/null 2>&1; then
     return 0
   fi
 
@@ -131,8 +130,9 @@ should_download() {
     return 1
   fi
 
-  # Get local file's timestamp in YYYYMMDD format
-  local local_date=$(date -r "$cache_path" +%Y%m%d)
+  # Get local file's timestamp from the cached directory name
+  local cached_dir=$(ls -t "${MAXMIND_CACHE_DIR}/${edition}_"* | head -n1)
+  local local_date=$(echo "$cached_dir" | grep -o '[0-9]\{8\}')
 
   if [ "$remote_date" -gt "$local_date" ]; then
     step "New version available (local: ${local_date}, remote: ${remote_date})"
