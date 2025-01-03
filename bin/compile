@@ -64,7 +64,7 @@ download_database() {
   local temp_dir=$(mktemp -d)
 
   step "Downloading ${edition} database..."
-  wget --no-verbose \
+  wget --quiet \
        --content-disposition \
        --directory-prefix="$temp_dir" \
        --user="$MAXMIND_ACCOUNT_ID" \
