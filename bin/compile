@@ -61,35 +61,38 @@ download_database() {
   local temp_dir=$(mktemp -d)
 
   step "Downloading ${edition} database..."
-  wget --quiet \
-       --content-disposition \
-       --directory-prefix="$temp_dir" \
-       --user="$MAXMIND_ACCOUNT_ID" \
-       --password="$MAXMIND_LICENSE_KEY" \
-       "$download_url"
+  local output_file="$temp_dir/${edition}.tar.gz"
 
-  if [ $? -ne 0 ]; then
+  if ! curl -sL \
+            --user "$MAXMIND_ACCOUNT_ID:$MAXMIND_LICENSE_KEY" \
+            --output "$output_file" \
+            "$download_url"; then
     error "Download failed for ${edition}"
     rm -rf "$temp_dir"
     return 1
   fi
 
-  # Get the versioned directory name from the archive
-  local archive_name=$(ls "$temp_dir")
-  local version_dir=$(basename "$archive_name" .tar.gz)
-
-  step "Extracting database from $archive_name..."
-  if ! tar -xzf "$temp_dir/$archive_name" -C "$temp_dir"; then
+  step "Extracting database from $(basename "$output_file")..."
+  if ! tar -xzf "$output_file" -C "$temp_dir"; then
     error "Extraction failed for ${edition}"
     rm -rf "$temp_dir"
     return 1
   fi
 
+  # Get the extracted directory name (should include the date)
+  local extracted_dir=$(find "$temp_dir" -mindepth 1 -maxdepth 1 -type d -name "${edition}_*" | head -n1)
+  if [ -z "$extracted_dir" ]; then
+    error "Could not find extracted directory for ${edition}"
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  local version_dir=$(basename "$extracted_dir")
   step "Installing new version ${version_dir}..."
 
   # Store versioned directory in cache (for version checking in subsequent builds)
   rm -rf "${MAXMIND_CACHE_DIR:?}/${edition}_"*
-  mv "$temp_dir/$version_dir" "$MAXMIND_CACHE_DIR/$version_dir"
+  mv "$extracted_dir" "$MAXMIND_CACHE_DIR/$version_dir"
 
   # Copy the database file to vendor directory (for runtime use)
   cp "$MAXMIND_CACHE_DIR/$version_dir/${edition}.mmdb" "$VENDOR_DIR/${edition}.mmdb"
@@ -97,55 +100,6 @@ download_database() {
   rm -rf "$temp_dir"
   step_succeeded "Successfully installed ${edition} database"
   return 0
-}
-
-should_download() {
-  local edition=$1
-  local download_url="https://download.maxmind.com/geoip/databases/${edition}/download?suffix=tar.gz"
-
-  # Check if any version of this edition exists in cache
-  if ! ls "${MAXMIND_CACHE_DIR}/${edition}_"* >/dev/null 2>&1; then
-    return 0
-  fi
-
-  step "Checking for updates to ${edition} database..."
-
-  # Get remote file info using wget HEAD request
-  local headers
-  headers=$(wget -S --method HEAD \
-                   --quiet \
-                   --user="$MAXMIND_ACCOUNT_ID" \
-                   --password="$MAXMIND_LICENSE_KEY" \
-                   "$download_url" 2>&1)
-
-  if [ $? -ne 0 ]; then
-    step "Failed to check for updates, using cached version"
-    return 1
-  fi
-
-  # Extract date from Content-Disposition filename (YYYYMMDD format)
-  local remote_date=$(echo "$headers" | grep -i 'content-disposition' | grep -o '[0-9]\{8\}')
-  if [ -z "$remote_date" ]; then
-    step "Could not determine remote version date, using cached version"
-    return 1
-  fi
-
-  # Get local file's timestamp from the cached directory name
-  local cached_dir=$(ls -t "${MAXMIND_CACHE_DIR}/${edition}_"* | head -n1)
-  local local_date=$(basename "$cached_dir" | grep -o '[0-9]\{8\}')
-
-  if [ -z "$local_date" ]; then
-    step "Could not determine local version date, downloading new version"
-    return 0
-  fi
-
-  if [ "$remote_date" -gt "$local_date" ]; then
-    step "New version available (local: ${local_date}, remote: ${remote_date})"
-    return 0
-  fi
-
-  step "Local database is up to date (${local_date})"
-  return 1
 }
 
 # Main logic
@@ -164,10 +118,11 @@ for edition in $MAXMIND_EDITIONS; do
   else
     step "Using cached version of ${edition}"
     # Get the most recent cached version directory
-    cached_dir=$(ls -t "${MAXMIND_CACHE_DIR}/${edition}_"* | head -n1)
+    cached_dir=$(find "${MAXMIND_CACHE_DIR}" -maxdepth 1 -type d -name "${edition}_*" | sort -r | head -n1)
     # Copy from the versioned directory to vendor
     cp "$cached_dir/${edition}.mmdb" "$VENDOR_DIR/${edition}.mmdb"
   fi
 done
 
 step_succeeded "MaxMind GeoIP2 installation complete"
+

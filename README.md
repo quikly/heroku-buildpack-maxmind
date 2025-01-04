@@ -97,3 +97,26 @@ const result = reader.get('8.8.8.8');
 heroku builds:cache:purge -a your-app-name
 ```
 
+## Local Testing
+
+To run the compile script locally using our test directory structure, follow these steps:
+
+1. Ensure test directories exist:
+
+```bash
+mkdir -p test/build/vendor test/cache/maxmind test/env
+```
+
+2. Set up test credentials (if you haven't already):
+
+```bash
+echo "your_license_key" > test/env/MAXMIND_LICENSE_KEY
+echo "your_account_id" > test/env/MAXMIND_ACCOUNT_ID
+```
+
+3. Run the compile script with the test paths:
+
+```bash
+./bin/compile "$PWD/test/build" "$PWD/test/cache" "$PWD/test/env"
+```
+
